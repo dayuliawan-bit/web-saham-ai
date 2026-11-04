@@ -1,6 +1,5 @@
 import streamlit as st
 import yfinance as yf
-import pandas_ta as ta
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -12,6 +11,26 @@ st.set_page_config(page_title="Stock Screener & AI Predictor", layout="wide")
 
 st.title("📈 AI Stock Screener & ML Predictor")
 st.write("Cari saham undervalue, analisis grafiknya, dan prediksi harga 30 hari ke depan menggunakan Machine Learning.")
+
+# --- FUNGSI INDIKATOR TEKNIKAL (PANDAS MURNI) ---
+def calculate_indicators(df):
+    # 1. Hitung RSI 14 Hari
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI_14'] = 100 - (100 / (1 + rs))
+    
+    # 2. Hitung MACD (12, 26, 9)
+    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp12 - exp26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # 3. Hitung SMA 200
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    
+    return df
 
 # --- SIDEBAR PENGATURAN ---
 st.sidebar.header("⚙️ Parameter Screener")
@@ -45,10 +64,8 @@ if st.sidebar.button("🔍 Mulai Screening"):
                         if isinstance(df.columns, pd.MultiIndex):
                             df.columns = df.columns.get_level_values(0)
                             
-                        # Kalkulasi Indikator
-                        df.ta.rsi(length=14, append=True)
-                        df.ta.macd(fast=12, slow=26, signal=9, append=True)
-                        df.ta.sma(length=200, append=True)
+                        # Kalkulasi Indikator Manual
+                        df = calculate_indicators(df)
                         df.dropna(inplace=True)
                         
                         st.session_state['stock_data'][ticker] = df
@@ -56,8 +73,8 @@ if st.sidebar.button("🔍 Mulai Screening"):
                         latest = df.iloc[-1]
                         close_price = float(latest['Close'])
                         rsi = float(latest['RSI_14'])
-                        macd_line = float(latest['MACD_12_26_9'])
-                        signal_line = float(latest['MACDs_12_26_9'])
+                        macd_line = float(latest['MACD'])
+                        signal_line = float(latest['MACD_Signal'])
                         ma200 = float(latest['SMA_200'])
                         
                         trend = "UPTREND" if close_price > ma200 else "DOWNTREND"
@@ -87,12 +104,10 @@ if st.sidebar.button("🔍 Mulai Screening"):
 if 'results' in st.session_state and st.session_state['results']:
     tab1, tab2, tab3 = st.tabs(["📋 Tabel Screener", "📊 Grafik Interaktif", "🤖 Prediksi AI (30 Hari)"])
     
-    # --- TAB 1: TABEL ---
     with tab1:
         st.subheader("Hasil Filter Valuasi Murah")
         st.dataframe(pd.DataFrame(st.session_state['results']), use_container_width=True)
         
-    # --- TAB 2: GRAFIK TEKNIKAL ---
     with tab2:
         st.subheader("Analisis Teknikal Lanjutan")
         available_tickers = list(st.session_state['stock_data'].keys())
@@ -113,33 +128,25 @@ if 'results' in st.session_state and st.session_state['results']:
             fig.update_layout(title=f"Pergerakan Harga & RSI - {selected_ticker_chart}", height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
             
-    # --- TAB 3: PREDIKSI ML (PROPHET) ---
     with tab3:
         st.subheader("Prediksi Pergerakan Harga dengan AI (Prophet)")
-        st.warning("⚠️ Disclaimer: Prediksi Machine Learning didasarkan pada probabilitas tren historis dan BUKAN jaminan harga masa depan. Gunakan sebagai alat bantu sekunder.")
+        st.warning("⚠️ Disclaimer: Prediksi Machine Learning didasarkan pada probabilitas tren historis dan BUKAN jaminan harga masa depan.")
         
         selected_ticker_ml = st.selectbox("Pilih Saham untuk Diprediksi:", available_tickers, key="ml_select")
         
         if st.button(f"Jalankan Prediksi 30 Hari untuk {selected_ticker_ml}"):
             with st.spinner("Model AI sedang mempelajari pola historis..."):
                 df_ml = st.session_state['stock_data'][selected_ticker_ml].copy()
-                
-                # Prophet membutuhkan format dataframe khusus: kolom 'ds' (Date) dan 'y' (Value)
                 df_prophet = df_ml.reset_index()[['Date', 'Close']]
                 df_prophet.columns = ['ds', 'y']
-                
-                # Hilangkan zona waktu (timezone) karena Prophet tidak mendukung datetime dengan timezone
                 df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
                 
-                # Inisialisasi dan latih model
                 model = Prophet(daily_seasonality=False, yearly_seasonality=True)
                 model.fit(df_prophet)
                 
-                # Buat dataframe untuk 30 hari ke depan
                 future = model.make_future_dataframe(periods=30)
                 forecast = model.predict(future)
                 
-                # Ambil prediksi hari ke-30
                 last_prediction = forecast.iloc[-1]
                 current_price = df_prophet['y'].iloc[-1]
                 predicted_price = last_prediction['yhat']
@@ -147,22 +154,9 @@ if 'results' in st.session_state and st.session_state['results']:
                 
                 st.success(f"Prediksi Selesai! Estimasi tren 30 hari ke depan: **{trend_direction}** (Target AI: Rp{predicted_price:,.0f})")
                 
-                # Tampilkan grafik prediksi Prophet menggunakan Plotly
                 fig_prophet = plot_plotly(model, forecast)
-                fig_prophet.update_layout(
-                    title=f"Forecast Harga 30 Hari - {selected_ticker_ml}",
-                    yaxis_title="Harga (Rp)",
-                    xaxis_title="Tanggal",
-                    template="plotly_dark",
-                    height=500
-                )
+                fig_prophet.update_layout(title=f"Forecast Harga 30 Hari - {selected_ticker_ml}", yaxis_title="Harga (Rp)", xaxis_title="Tanggal", template="plotly_dark", height=500)
                 st.plotly_chart(fig_prophet, use_container_width=True)
-                
-                # Tabel data forecast (5 hari terakhir)
-                st.write("Data Prediksi Mendatang (yhat = harga prediksi, lower/upper = rentang toleransi):")
-                forecast_display = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(30)
-                forecast_display.rename(columns={'ds': 'Tanggal', 'yhat': 'Prediksi', 'yhat_lower': 'Batas Bawah', 'yhat_upper': 'Batas Atas'}, inplace=True)
-                st.dataframe(forecast_display.set_index('Tanggal'), use_container_width=True)
 
 elif 'results' in st.session_state and not st.session_state['results']:
     st.info("Tidak ada saham yang lolos kriteria fundamental.")
